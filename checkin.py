@@ -1,6 +1,7 @@
 # -- coding: utf-8 --
 import os
 import requests
+from curl_cffi import requests as browser_requests
 import re
 import sys
 import json
@@ -73,7 +74,8 @@ def response_diagnostics(resp):
         category = 'http_error'
     else:
         category = 'application_response'
-    cookie_names = {item.name for item in resp.cookies}
+    # requests 与 curl_cffi 的 Cookie 容器都支持 keys()。
+    cookie_names = set(resp.cookies.keys())
     diagnostics = {
         'http_status': resp.status_code,
         'response_type': response_type,
@@ -107,11 +109,13 @@ def checkin(cookie, random_mode=False):
         'Sec-Fetch-Dest': 'empty',
         'Sec-Fetch-Mode': 'cors',
         'Sec-Fetch-Site': 'same-origin',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        # User-Agent 由 Chrome 模拟配置生成，避免与 TLS 指纹不匹配。
     }
     
     try:
-        resp = requests.post(url, headers=headers, timeout=15)
+        resp = browser_requests.post(
+            url, headers=headers, timeout=15, impersonate='chrome136'
+        )
     except Exception as e:
         return False, f"请求异常: {e}", 0
 
