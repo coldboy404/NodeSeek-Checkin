@@ -37,6 +37,61 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"发送 Telegram 异常: {e}")
 
+def response_diagnostics(resp):
+    """只输出分类和布尔信息，不记录 Cookie、响应正文或原始响应头。"""
+    body = resp.text[:200000].lower()
+    challenge = (
+        resp.headers.get('cf-mitigated', '').lower() == 'challenge'
+        or any(marker in body for marker in (
+            '/cdn-cgi/challenge-platform/', 'cf-chl-',
+            'just a moment...', 'checking your browser',
+        ))
+    )
+    content_type = resp.headers.get('Content-Type', '').lower()
+    response_type = 'json' if 'json' in content_type else (
+        'html' if 'html' in content_type else 'other'
+    )
+    auth_error = False
+    if response_type == 'json':
+        try:
+            data = resp.json()
+            if isinstance(data, dict):
+                message = str(data.get('message', ''))
+                auth_error = bool(re.search(
+                    r'未登录|请.*登录|登录.*(过期|失效)|无权限|no permission|unauthorized|not logged',
+                    message, re.I,
+                ))
+        except ValueError:
+            pass
+    if challenge:
+        category = 'cloudflare_challenge'
+    elif auth_error or resp.status_code == 401:
+        category = 'authentication_rejected'
+    elif resp.status_code == 403:
+        category = 'forbidden_unknown'
+    elif resp.status_code != 200:
+        category = 'http_error'
+    else:
+        category = 'application_response'
+    cookie_names = {item.name for item in resp.cookies}
+    diagnostics = {
+        'http_status': resp.status_code,
+        'response_type': response_type,
+        'cloudflare_server': resp.headers.get('Server', '').lower() == 'cloudflare',
+        'cloudflare_ray_present': bool(resp.headers.get('cf-ray')),
+        'challenge_detected': challenge,
+        'auth_error_detected': auth_error,
+        'category': category,
+        'set_cookie_present': 'Set-Cookie' in resp.headers,
+        'response_cookie_count': len(cookie_names),
+        'clearance_cookie_updated': 'cf_clearance' in cookie_names,
+        'known_login_cookie_updated': bool(cookie_names & {'session', 'pjwt'}),
+        'redirect_count': len(resp.history),
+    }
+    print('[诊断] ' + json.dumps(diagnostics, ensure_ascii=False))
+    return category
+
+
 def checkin(cookie, random_mode=False):
     """签到函数，使用正确的 API 方式：POST /api/attendance?random=true/false，body为空"""
     random_param = 'true' if random_mode else 'false'
@@ -60,11 +115,17 @@ def checkin(cookie, random_mode=False):
     except Exception as e:
         return False, f"请求异常: {e}", 0
 
+    category = response_diagnostics(resp)
     if resp.status_code != 200:
         if resp.status_code == 500:
             if '已签到' in resp.text or '重复' in resp.text:
                 return True, "已签到（今日已打卡）", 0
-        return False, f"HTTP {resp.status_code}", 0
+        reason = {
+            'cloudflare_challenge': 'Cloudflare 验证拦截',
+            'authentication_rejected': '登录认证被拒绝',
+            'forbidden_unknown': '访问被拒绝，原因未明',
+        }.get(category, '接口异常')
+        return False, f"HTTP {resp.status_code}（{reason}）", 0
 
     try:
         result = resp.json()
